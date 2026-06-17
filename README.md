@@ -14,7 +14,7 @@ The kit itself lives in [`alfresco-mcp/`](./alfresco-mcp/) — see its
 ## Quick start (consume the published kit)
 
 ```console
-$ sbx run claude --kit docker.io/<namespace>/sbx-alfresco-mcp-kit:1.1.0 .
+$ sbx run claude --kit docker.io/angelborroy/sbx-alfresco-mcp-kit:1.1.0 .
 ```
 
 You need an Alfresco repository the sandbox can reach (by default one running on
@@ -26,7 +26,7 @@ Install the `sbx` CLI (`brew install docker/tap/sbx` on macOS) and `sbx login`,
 then:
 
 ```console
-$ DOCKER_NAMESPACE=<your-hub-user> ./scripts/publish.sh
+$ DOCKER_NAMESPACE=angelborroy ./scripts/publish.sh
 ```
 
 `scripts/publish.sh` rsyncs a **clean staging copy** before pushing, because
