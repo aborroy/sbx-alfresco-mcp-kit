@@ -1,0 +1,124 @@
+schemaVersion: "1"
+kind: mixin
+name: alfresco-mcp
+extends: claude
+displayName: Alfresco MCP server
+description: "Installs the AlfrescoLabs MCP server (https://github.com/AlfrescoLabs/alfresco-mcp-server) and registers it as a stdio MCP server on the claude agent, so the agent can search, browse, and manage content in an Alfresco repository. Defaults to an Alfresco reachable at http://host.docker.internal:8080; override ALFRESCO_HOST for a different instance."
+
+network:
+  # Kept deliberately narrow: only the hosts the install actually touches. The
+  # base claude template already ships python3 + pip, so we do NOT add apt
+  # mirrors (archive/security/ports.ubuntu.com, download.docker.com) — every
+  # allowed domain is injected into the sandbox's egress policy, so a mixin
+  # should allowlist exactly what it needs and nothing more.
+  allowedDomains:
+    # Fetch the pinned MCP server script. The raw blob at an exact commit is
+    # served directly by raw.githubusercontent.com (no redirect to github.com).
+    - raw.githubusercontent.com
+    # pip: fastmcp + httpx and their transitive dependencies.
+    - pypi.org
+    - files.pythonhosted.org
+    # NOTE: the default Alfresco target (host.docker.internal:8080) is reached
+    # over the Docker bridge, which is exempt from this egress allowlist (same
+    # as the claude-ollama / claude-model-runner kits). To point at a REMOTE
+    # Alfresco, fork this kit and add that host here, e.g. `alfresco.example.com`.
+
+environment:
+  variables:
+    # Base URL of the Alfresco repository the MCP server talks to. The default
+    # assumes you run Alfresco on the host (e.g. the official acs-deployment
+    # community compose) and reach it over the Docker bridge. Override to point
+    # at a different instance — and remember to allowlist its host above if it
+    # is not on host.docker.internal / localhost.
+    ALFRESCO_HOST: "http://host.docker.internal:8080"
+
+commands:
+  install:
+    # Install the Alfresco MCP server from a pinned, SHA256-verified commit of
+    # AlfrescoLabs/alfresco-mcp-server. It is a single self-contained script
+    # (alfresco_mcp_server.py) plus two pip deps (fastmcp, httpx). We pin to an
+    # exact commit + digest rather than a tag or `latest` so the version is
+    # captured in git — same supply-chain stance as the vale / mise kits. To
+    # bump: change MCP_REF (a 40-hex commit SHA) and MCP_SHA256 (sha256 of the
+    # script at that commit).
+    - command: |
+        set -euo pipefail
+        # 1. python3 + pip are provided by the base claude template (and the
+        #    shell template). Fail fast with a clear message rather than reaching
+        #    for apt, which would require allowlisting Ubuntu mirrors and widen
+        #    this kit's egress policy. Fork and add an apt step + mirrors if you
+        #    target a template without python3.
+        if ! command -v python3 >/dev/null 2>&1 || ! python3 -m pip --version >/dev/null 2>&1; then
+          echo "alfresco-mcp: python3 + pip are required but missing on this template" >&2
+          exit 1
+        fi
+        # 2. Fetch the pinned, digest-verified server script.
+        MCP_REF=d9c4ba94d19b1eab794b012d94d767b21edbb6a0   # tag 1.1.0
+        MCP_SHA256=6fe999593f4347930dbe43a600b0324111d47ff51d94a6cb6da738bff261343a
+        mkdir -p /home/agent/.alfresco-mcp
+        curl --proto '=https' --tlsv1.2 -fsSL \
+          -o /home/agent/.alfresco-mcp/alfresco_mcp_server.py \
+          "https://raw.githubusercontent.com/AlfrescoLabs/alfresco-mcp-server/${MCP_REF}/alfresco_mcp_server.py"
+        echo "${MCP_SHA256}  /home/agent/.alfresco-mcp/alfresco_mcp_server.py" | sha256sum -c -
+        chown -R agent:agent /home/agent/.alfresco-mcp
+        # 3. Install the runtime deps system-wide so the agent user can run it.
+        #    fastmcp is left unpinned to match the server's own requirements.txt;
+        #    the load-bearing pin is the SHA256-verified script above.
+        python3 -m pip install --break-system-packages --no-cache-dir 'fastmcp' 'httpx>=0.27.0'
+        # 4. Verify (install exit 0 is not enough — confirm the deps import).
+        python3 -c "import fastmcp, httpx; print('alfresco-mcp deps OK')"
+      user: "0"
+      description: "Install pinned AlfrescoLabs MCP server (1.1.0) + fastmcp/httpx"
+  startup:
+    # Register the server in ~/.claude.json under mcpServers so Claude Code
+    # discovers it. This runs after the base claude kit's initFiles have written
+    # ~/.claude.json, so we MERGE (load existing JSON, add our key, write back)
+    # rather than overwrite — preserving the base bypass flags. The merge is
+    # idempotent, which is required because startup runs on every container start.
+    # Startup commands are exec argv (no shell), so we invoke python3 directly.
+    - command:
+        - python3
+        - -c
+        - |
+          import json, os, pathlib
+          p = pathlib.Path(os.path.expanduser("~/.claude.json"))
+          try:
+              data = json.loads(p.read_text())
+          except Exception:
+              data = {}
+          if not isinstance(data, dict):
+              data = {}
+          data.setdefault("mcpServers", {})["alfresco"] = {
+              "command": "python3",
+              "args": [os.path.expanduser("~/.alfresco-mcp/alfresco_mcp_server.py")],
+              "env": {
+                  "ALFRESCO_HOST": os.environ.get("ALFRESCO_HOST", "http://host.docker.internal:8080"),
+                  "TRANSPORT_MODE": "stdio",
+              },
+          }
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(json.dumps(data, indent=2))
+          print("registered alfresco MCP server in", p)
+      user: "1000"
+      description: "Register the Alfresco MCP server in ~/.claude.json (idempotent merge)"
+
+memory: |
+  ## Alfresco MCP server
+
+  An MCP server named `alfresco` is registered (stdio) and lets you work with an
+  Alfresco content repository via its REST API. It talks to the repository at
+  `ALFRESCO_HOST` (default `http://host.docker.internal:8080`, i.e. an Alfresco
+  running on the host).
+
+  **Authentication is ticket-based and not preset.** Before calling content
+  tools, obtain a ticket and register it by calling the `set_ticket` tool (get a
+  ticket from `POST {ALFRESCO_HOST}/alfresco/api/-default-/public/authentication/versions/1/tickets`
+  with your credentials; use the returned `id`). Alternatively set the
+  `ALFRESCO_TICKET` env var for non-interactive use. Use `set_host` to switch
+  repositories at runtime.
+
+  Headline tools: `search_content`, `advanced_search`, `cmis_search`,
+  `browse_repository`, `get_node_properties` / `update_node_properties`,
+  `upload_document`, `download_document`, `get_pdf_rendition`, `create_folder`,
+  `delete_node`, `checkout_document` / `checkin_document` / `cancel_checkout`,
+  `get_repository_info_tool`, plus a `repository_info` resource.

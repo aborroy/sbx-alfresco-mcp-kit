@@ -1,0 +1,34 @@
+# Nightly + PR tester: validate the kit manifest. Never pushes.
+# Decoupled from publishing so policy tweaks don't trigger a release.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly, to catch upstream drift (e.g. the pinned MCP-server commit going
+    # away, or pip deps failing to resolve).
+    - cron: "0 4 * * *"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install sbx CLI
+        run: |
+          curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
+          sudo apt-get install -y docker-sbx
+
+      - name: Validate kit manifest
+        run: sbx kit validate ./alfresco-mcp
+
+      - name: Verify the pinned MCP server still resolves at its digest
+        run: |
+          ref=d9c4ba94d19b1eab794b012d94d767b21edbb6a0
+          want=6fe999593f4347930dbe43a600b0324111d47ff51d94a6cb6da738bff261343a
+          got=$(curl -fsSL "https://raw.githubusercontent.com/AlfrescoLabs/alfresco-mcp-server/${ref}/alfresco_mcp_server.py" | sha256sum | awk '{print $1}')
+          echo "want=$want"; echo "got =$got"
+          [ "$want" = "$got" ] || { echo "::error::pinned MCP server digest mismatch — bump MCP_REF/MCP_SHA256 together"; exit 1; }
